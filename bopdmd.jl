@@ -3,11 +3,42 @@ quickactivate("/home/michael/Documents/Julia/DMD/env")
 using LinearAlgebra
 using Plots
 using Distributions, Random, Statistics
-using StaticArrays
+using DataFrames, DifferentialEquations, DelayEmbeddings
+
+function lotka_volterra(du, u, p, t)
+    du[1] = p[1] * u[1] - p[2] * u[1] * u[2]
+    du[2] = -p[3] * u[2] + p[4] * u[1] * u[2]
+end
+
+function delayEmbed(X::AbstractMatrix{<:Number}, τ::Int, d::Int)
+    n, m = size(X)
+    if n == 0 || m == 0
+        error("Input matrix X to delayEmbed is empty.")
+    end
+    num_delay_rows = n - (d - 1) * τ
+    if num_delay_rows <= 0
+        error("Cannot delay embed: result would have non-positive rows. n=$n, d=$d, τ=$τ")
+    end
+    X_delay = zeros(eltype(X), num_delay_rows, m * d)
+    Threads.@threads for i in 1:num_delay_rows
+        for j in 1:d
+            start_row_idx = i + (j - 1) * τ
+            start_col_idx = (j - 1) * m + 1
+            end_col_idx = j * m
+            # Ensure indices are within bounds
+            if start_row_idx > n
+                 error("Index out of bounds during delay embedding: start_row_idx=$start_row_idx > n=$n")
+            end
+            X_delay[i, start_col_idx:end_col_idx] = X[start_row_idx, :]
+        end
+    end
+    return X_delay
+end
+
 
 # IT HAS BEEN DECREED BY GOD THAT X IS (features x time)
 
-function _svht(sigma_svd::AbstractArray{<:Number, 1}, rows::Integer, cols::Integer)
+function _svht(sigma_svd::AbstractArray{<:AbstractFloat, 1}, rows::Integer, cols::Integer)
     """
     Singular Value Hard Threshold.
 
@@ -26,7 +57,7 @@ function _svht(sigma_svd::AbstractArray{<:Number, 1}, rows::Integer, cols::Integ
     return rank
 end
 
-function _compute_rank(sigma_svd::AbstractArray{<:Number, 1}, rows::Integer, cols::Integer, svd_rank::Number=0)
+function _compute_rank(sigma_svd::AbstractArray{<:AbstractFloat, 1}, rows::Integer, cols::Integer, svd_rank::Number=0)
     """
     Rank computation for the truncated Singular Value Decomposition.
 
@@ -107,6 +138,7 @@ function compute_svd(X::AbstractArray{<:Number, 2}, svd_rank::Number = 0)
     elseif svd_rank == -1
         svd_rank = min(size(X, 1), size(X, 2))
     end
+    @assert sum(isnan.(X)) == 0 && sum(isinf.(X)) == 0
     F = svd(X)
     U, s, V = F.U, F.S, F.Vt' # features x features, features, time x features
     U, s, V = U[:, 1:svd_rank], s[1:svd_rank], V[:, 1:svd_rank]
@@ -139,12 +171,12 @@ function _initialize_alpha(s, V, svd_rank::Integer, t::AbstractArray{<:Number, 1
         Z = ((ux2 .- ux1)' ./ (t[2:end] .- t[1:end-1]))'
          size(Y), size(Z)
         U, s2, V2 = compute_svd(Y, svd_rank)
-         size(U), size(s2), size(V2)
-        S = diagm(s2)
+        S2 = diagm(1 ./ s2)
 
         # Compute the matrix Atilde and return its eigenvalues.
-         size(U), size(Z), size(V2), size(S)
-        Atilde = U' * Z * V2 * inv(S)
+        # @showsize(U), size(Z), size(V2), size(S2)
+        # @show S2
+        Atilde = U' * Z * V2 * S2
 
         return eigvals(Atilde)
 end
@@ -172,7 +204,7 @@ function _diff_func(eigenvalues::AbstractArray{<:Number, 1}, omega::Number, ind:
     return complex.(0.0, diff)
 end
 
-function _push_eigenvalues!(eigenvalues::AbstractArray{<:Number, 1}, eig_constraints::AbstractArray{<:AbstractString, 1}, eig_limit::Number=Inf) where T <: Number
+function _push_eigenvalues!(eigenvalues::AbstractArray{<:Number, 1}, eig_constraints::AbstractArray{<:AbstractString, 1}, eig_limit::Number=Inf)
     if "conjugate_pairs" in eig_constraints
         nothing
     end
@@ -221,31 +253,12 @@ function compute_error(X_i::AbstractArray{<:Number, 2}, B_i::AbstractArray{<:Num
     return residual, objective, err
 end
 
-function computeB(alpha, t, H)
+function computeB(alpha::AbstractArray{<:Number, 1}, t::AbstractArray{<:Number, 1}, H::AbstractArray{<:Number, 2})
     A = exp_function(alpha, t)
     return A \ H
 end
 
-svd_rank = 100
-data_rank = 100
-true_rank = 20
-timesteps = 500
-dt = 0.01
-X = generate_VAR(timesteps, true_rank, 2)'
-t = dt .* collect(1:timesteps)
-
-rank, U, s, V = compute_rank(X, true_rank)
-alpha = _initialize_alpha(s, V, rank, t)
-_push_eigenvalues!(alpha, ["limited", "stable"], 10)
-
-B = computeB(alpha, t, X')
-
-residuals, obj, err = compute_error(X', B, alpha, t)
-
-# println("Relative error: ", err)
-
-
-function _bag(X::AbstractArray{<:Number, 2}, trial_size::Number, rng::AbstractRNG = Random.GLOBAL_RNG)
+function _bag(X::AbstractArray{<:Number, 2}, trial_size::Number, rng::AbstractRNG=Random.GLOBAL_RNG)
     if 0 < trial_size < 1
         batch_size = round(Int, trial_size * size(X, 2))
     elseif trial_size >= 1 && isa(trial_size, Integer)
@@ -264,7 +277,7 @@ function _bag(X::AbstractArray{<:Number, 2}, trial_size::Number, rng::AbstractRN
     end
 
     # Obtain and return subset of the data.
-    all_inds = randperm(size(X, 2))
+    all_inds = randperm(rng, size(X, 2))
     subset_inds = all_inds[1:batch_size]
     return X[:, subset_inds], subset_inds
 end
@@ -641,8 +654,7 @@ function compute_operator(X::AbstractArray{<:Number, 2},
     rngs = [Random.Xoshiro(i) for i in 1:Threads.nthreads()]
 
     for k in 1:num_trials
-        # thread_rng = rngs[Threads.threadid()]
-        thread_rng = rngs[1]
+        thread_rng = rngs[Threads.threadid()]
         # Bag data for this trial
         X_i, subset_inds = _bag(X, trial_size, thread_rng)
         
@@ -791,22 +803,43 @@ function fitBOPDMD(X::AbstractArray{<:Number, 2}, t::AbstractArray{<:Number, 1};
     return _b, _eigenvalues, _eigenvalues_std, _modes, _modes_std, _amplitudes_std
 end
 
-# Standardize X
-X = (X .- mean(X, dims=2)) ./ std(X, dims=2)
-num_features = size(X, 2)
-X = permutedims(cat([X for _ in 1:100]...; dims=3), (3, 1, 2))
-Bs = Vector{Vector{ComplexF64}}(undef, size(X, 1))
-eigs = Vector{Vector{ComplexF64}}(undef, size(X, 1))
-eigs_std = Vector{Vector{Float64}}(undef, size(X, 1))
-modes = Vector{Matrix{ComplexF64}}(undef, size(X, 1))
-modes_std = Vector{Vector{Float64}}(undef, size(X, 1))
-amplitudes_std = Vector{Vector{Float64}}(undef, size(X, 1))
-@Threads.threads for ii in 1:size(X, 1)
-    B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(X[ii, :, :], t, eig_constraints=String[])
-    Bs[ii] = complex.(B)
-    eigs[ii] = eig
-    eigs_std[ii] = eig_std
-    modes[ii] = _mode
-    modes_std[ii] = mode_std[1, :]
-    amplitudes_std[ii] = amplitude_std
-end
+# timesteps = 1000
+# dt = 0.1
+# t = dt * collect(0:timesteps-1)
+# tspan = (t[1], t[end])
+
+# p = [1.5, 1.0, 3.0, 1.0]
+# nTrials = 100
+# u₀s = rand(2, nTrials)
+# Xs = Vector{Matrix{Float64}}(undef, nTrials)
+# Threads.@threads for ii in 1:nTrials
+#     prob = ODEProblem(lotka_volterra, u₀s[:, ii], tspan, p)
+#     sol = solve(prob, Tsit5(), reltol=1e-8, abstol=1e-8, saveat=t)
+#     U = Array(sol)
+
+#     d, τ = 10, 1
+#     X = delayEmbed(U', τ, d)'
+#     Xs[ii] = X
+# end
+# timesteps = size(Xs[1], 2)
+# t = dt * collect(0:timesteps-1)
+
+
+# B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[1], t, eig_constraints=String[])
+
+# Bs = Vector{Vector{ComplexF64}}(undef, size(Xs, 1))
+# eigs = Vector{Vector{ComplexF64}}(undef, size(Xs, 1))
+# eigs_std = Vector{Vector{Float64}}(undef, size(Xs, 1))
+# modes = Vector{Matrix{ComplexF64}}(undef, size(Xs, 1))
+# modes_std = Vector{Vector{Float64}}(undef, size(Xs, 1))
+# amplitudes_std = Vector{Vector{Float64}}(undef, size(Xs, 1))
+# Threads.@threads for ii in 1:size(Xs, 1)
+# # for ii in 1:size(X, 1)
+#     B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[ii], t, eig_constraints=String[])
+#     Bs[ii] = complex.(B)
+#     eigs[ii] = eig
+#     eigs_std[ii] = eig_std
+#     modes[ii] = _mode
+#     modes_std[ii] = mode_std[1, :]
+#     amplitudes_std[ii] = amplitude_std
+# end

@@ -1,3 +1,4 @@
 *.old
 .direnv
 *.ipynb
+old/

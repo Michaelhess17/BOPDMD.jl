@@ -7,7 +7,7 @@ using ProgressMeter
 
 include("bopdmd.jl")
 
-τ, d = 1, 10
+τ, d = 1, 20
 
 df = CSV.read("/home/michael/Documents/Python/HAVOK/delase/data/all_human_data_metadata.csv", DataFrame)
 df = select(df, Not(:Column1))
@@ -18,20 +18,20 @@ Xs = permutedims(Xs, (1, 3, 2))
 
 dt = 0.01
 t = dt .* (0:size(Xs, 3)-1)
+svd_rank = 40
 
+B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[1, :, :], t; _svd_rank=svd_rank)
 
-B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[1, :, :], t, eig_constraints=String["stable"])
-
-Bs = Vector{Union{Vector{ComplexF64}, Nothing}}(nothing, size(Xs, 1))
-eigs = Vector{Union{Vector{ComplexF64}, Nothing}}(nothing, size(Xs, 1))
-eigs_std = Vector{Union{Vector{Float64}, Nothing}}(nothing, size(Xs, 1))
-modes = Vector{Union{Matrix{ComplexF64}, Nothing}}(nothing, size(Xs, 1))
-modes_std = Vector{Union{Vector{Float64}, Nothing}}(nothing, size(Xs, 1))
-amplitudes_std = Vector{Union{Vector{Float64}, Nothing}}(nothing, size(Xs, 1))
+Bs = Vector{Union{Vector{ComplexF32}, Nothing}}(nothing, size(Xs, 1))
+eigs = Vector{Union{Vector{ComplexF32}, Nothing}}(nothing, size(Xs, 1))
+eigs_std = Vector{Union{Vector{Float32}, Nothing}}(nothing, size(Xs, 1))
+modes = Vector{Union{Matrix{ComplexF32}, Nothing}}(nothing, size(Xs, 1))
+modes_std = Vector{Union{Vector{Float32}, Nothing}}(nothing, size(Xs, 1))
+amplitudes_std = Vector{Union{Vector{Float32}, Nothing}}(nothing, size(Xs, 1))
 
 p = Progress(size(Xs, 1))
 Threads.@threads for ii in axes(Xs, 1)
-    B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[ii, :, :], t, eig_constraints=String["stable"])
+    B, eig, eig_std, _mode, mode_std, amplitude_std = fitBOPDMD(Xs[ii, :, :], t; _svd_rank=svd_rank, trial_size=0.8, num_trials=30)
     Bs[ii] = complex.(B)
     eigs[ii] = eig
     eigs_std[ii] = eig_std
@@ -66,3 +66,41 @@ scatter!(sin.(phi), cos.(phi), seriestype=:scatter, color=:black, legend=false, 
 xlims!(-2.0, 2.0)
 ylims!(-2.0, 2.0)
 savefig("figures/eigenvalues.pdf")
+
+AB_eigs = hcat(valid_eigs[valid_df[!, :lf_or_hf] .== "AB"]...)
+LF_eigs = hcat(valid_eigs[valid_df[!, :lf_or_hf] .== "LF"]...)
+HF_eigs = hcat(valid_eigs[valid_df[!, :lf_or_hf] .== "HF"]...)
+
+function bootstrap_mean(X, nboot)
+    tmp = Vector{Float64}(undef, nboot)
+    for ii in 1:nboot
+        @inbounds tmp[ii] = mean(X[rand(1:end, length(X))])
+    end
+    return tmp
+end
+
+histogram(vec(real.(AB_eigs)), bins=500, label="AB", alpha=0.5, normalize=true)
+histogram!(vec(real.(LF_eigs)), bins=50, label="LF", alpha=0.5, normalize=true)
+histogram!(vec(real.(HF_eigs)), bins=1000, label="HF", alpha=0.5, normalize=true)
+xlims!(-2, 2)
+savefig("figures/eigenvalues_hist.pdf")
+
+AB_eigs_unstable = vec(AB_eigs[real.(AB_eigs) .> 0.0])
+LF_eigs_unstable = vec(LF_eigs[real.(LF_eigs) .> 0.0])
+HF_eigs_unstable = vec(HF_eigs[real.(HF_eigs) .> 0.0])
+
+histogram(bootstrap_mean(real.(AB_eigs_unstable), 1000), bins=20, label="AB", alpha=0.5, normalize=true)
+histogram!(bootstrap_mean(real.(LF_eigs_unstable), 1000), bins=20, label="LF", alpha=0.5, normalize=true)
+histogram!(bootstrap_mean(real.(HF_eigs_unstable), 1000), bins=20, label="HF", alpha=0.5, normalize=true)
+# xlims!(-0.6, 0.5)
+savefig("figures/eigenvalues_hist_unstable.pdf")
+
+AB_eigs_stable = vec(AB_eigs[real.(AB_eigs) .<= 0.0])
+LF_eigs_stable = vec(LF_eigs[real.(LF_eigs) .<= 0.0])
+HF_eigs_stable = vec(HF_eigs[real.(HF_eigs) .<= 0.0])
+
+histogram(bootstrap_mean(real.(AB_eigs_stable), 1000), bins=20, label="AB", alpha=0.5, normalize=true)
+histogram!(bootstrap_mean(real.(LF_eigs_stable), 1000), bins=20, label="LF", alpha=0.5, normalize=true)
+histogram!(bootstrap_mean(real.(HF_eigs_stable), 1000), bins=20, label="HF", alpha=0.5, normalize=true)
+# xlims!(-0.6, 0.5)
+savefig("figures/eigenvalues_hist_stable.pdf")

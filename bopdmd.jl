@@ -132,7 +132,7 @@ function compute_rank(X::AbstractArray{<:Number, 2}, svd_rank::Number = 0)
     return _compute_rank(s, rows, cols, svd_rank), U, s, V
 end
 
-function compute_svd(X::AbstractArray{<:Number, 2}, svd_rank::Number = 0)
+function compute_svd(X::AbstractArray{<:Number, 2}, svd_rank::Integer = 0)
     if svd_rank == 0
         svd_rank, s, V = compute_rank(X, svd_rank)
     elseif svd_rank == -1
@@ -145,18 +145,6 @@ function compute_svd(X::AbstractArray{<:Number, 2}, svd_rank::Number = 0)
     return U, s, V
 end
 
-function generate_VAR(T, D, p)
-    A = [randn(D, D) * 0.5 for _ in 1:p]  # VAR(p) coefficients
-    A = [A[i] / maximum(abs.(eigvals(A[i]))) for i in 1:p]  # Ensure stability
-    X = zeros(T, D)
-    for t in p+1:T
-        for lag in 1:p
-            X[t, :] += A[lag] * X[t - lag, :]
-        end
-        X[t, :] += randn(D)  # Add noise
-    end
-    return X
-end
 
 function _initialize_alpha(s, V, svd_rank::Integer, t::AbstractArray{<:Number, 1})
     """ Initialize alpha using Exact DMD on projected data. X is features x time. """

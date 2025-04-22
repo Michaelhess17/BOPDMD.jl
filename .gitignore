@@ -2,3 +2,8 @@
 .direnv
 *.ipynb
 old/
+*old*
+*copy*
+*.npy
+*tmp*
+*.pdf
